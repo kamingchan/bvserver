@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,10 +20,19 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const (
-	ChunkSize = bytefmt.MEGABYTE * 10
-	CDN       = "upos-sz-mirroraliov.bilivideo.com"
+var (
+	Listen     string
+	ChunkSize  int
+	CDN        string
+	ServerName string
 )
+
+func init() {
+	flag.StringVar(&Listen, "listen", "127.0.0.1:2333", "listen address")
+	flag.IntVar(&ChunkSize, "chunksize", 10, "chunk size in MB")
+	flag.StringVar(&CDN, "cdn", "upos-sz-mirroraliov.bilivideo.com", "Bilibili CDN host")
+	flag.StringVar(&ServerName, "server", "bvserver", "Custom server name")
+}
 
 var (
 	client = &http.Client{
@@ -66,8 +77,13 @@ func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask
 		task.err = err
 		return
 	}
-	slog.Info("get video size", slog.String("key", key), slog.Int64("size", size))
+	slog.Info("get video size", slog.String("key", key), slog.String("size", bytefmt.ByteSize(uint64(size))))
+
+	// copy header
 	task.header = header.Clone()
+	task.header.Del("Via")
+	task.header.Del("X-Cache")
+	task.header.Set("X-Server", ServerName)
 
 	tempF, err := os.CreateTemp("", key)
 	if err != nil {
@@ -87,16 +103,35 @@ func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask
 			task.done.Store(true)
 		}
 		pass := time.Since(start).Seconds()
-		speed := float64(size) / pass / bytefmt.MEGABYTE
-		slog.Info("download finished", slog.String("key", key), slog.String("path", tempF.Name()), slog.Float64("speed(MB/s)", speed))
+		speed := float64(size) / pass
+		slog.Info("download finished",
+			slog.String("key", key),
+			slog.String("path", tempF.Name()),
+			slog.String("speed", bytefmt.ByteSize(uint64(speed))+"/s"),
+		)
 	}()
 
 	return task
 }
 
+var (
+	CacheBytes  = &atomic.Uint64{}
+	ByPassBytes = &atomic.Uint64{}
+)
+
+type wrapper struct {
+	http.ResponseWriter
+}
+
+func (w *wrapper) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	CacheBytes.Add(uint64(n))
+	return n, err
+}
+
 func ResponseWithFile(writer http.ResponseWriter, request *http.Request, task *VideoTask) {
 	copyHeaders(writer.Header(), task.header)
-	http.ServeFile(writer, request, task.file)
+	http.ServeFile(&wrapper{writer}, request, task.file)
 }
 
 func ResponseByPass(writer http.ResponseWriter, link url.URL, header http.Header) {
@@ -116,7 +151,23 @@ func ResponseByPass(writer http.ResponseWriter, link url.URL, header http.Header
 
 	copyHeaders(writer.Header(), resp.Header)
 	writer.WriteHeader(resp.StatusCode)
-	io.Copy(writer, resp.Body)
+	written, _ := io.Copy(writer, resp.Body)
+	ByPassBytes.Add(uint64(written))
+}
+
+func HandleStat(writer http.ResponseWriter, request *http.Request) error {
+	var (
+		c = bytefmt.ByteSize(CacheBytes.Load())
+		b = bytefmt.ByteSize(ByPassBytes.Load())
+	)
+
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+
+	return json.NewEncoder(writer).Encode(map[string]any{
+		"cache_hit": c,
+		"bypass":    b,
+	})
 }
 
 func copyHeaders(dst http.Header, src http.Header) {
@@ -190,11 +241,13 @@ func DownloadToFile(link url.URL, header http.Header, start, end int, f *os.File
 }
 
 func DownloadChunk(link url.URL, header http.Header, size int64, f *os.File) error {
+	chunkSize := ChunkSize * bytefmt.MEGABYTE
+
 	eg, _ := errgroup.WithContext(context.Background())
-	for i := 0; i < int(size); i += ChunkSize {
+	for i := 0; i < int(size); i += chunkSize {
 		var (
 			start = i
-			end   = i + ChunkSize - 1
+			end   = i + chunkSize - 1
 		)
 		if end >= int(size) {
 			end = int(size) - 1
@@ -213,7 +266,20 @@ var (
 
 type handler struct{}
 
-func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+func ServeHTTP(writer http.ResponseWriter, request *http.Request) error {
+	if strings.HasPrefix(request.URL.Path, "/stat") {
+		return HandleStat(writer, request)
+	}
+	if strings.HasPrefix(request.URL.Path, "/upgcxcode") {
+		return HandleVideo(writer, request)
+	}
+
+	writer.Header().Set("Location", "https://github.com/kamingchan/bvserver")
+	writer.WriteHeader(http.StatusTemporaryRedirect)
+	return nil
+}
+
+func HandleVideo(writer http.ResponseWriter, request *http.Request) error {
 	key := request.URL.Path
 	key = strings.ReplaceAll(key, "/", "")
 
@@ -248,8 +314,14 @@ func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	} else {
 		ResponseByPass(writer, link, header)
 	}
+	return nil
+}
+
+func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	ServeHTTP(writer, request)
 }
 
 func main() {
-	http.ListenAndServe(":2333", &handler{})
+	flag.Parse()
+	http.ListenAndServe(Listen, &handler{})
 }
