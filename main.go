@@ -71,7 +71,7 @@ func (t *VideoTask) Error() error {
 func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask) {
 	task = new(VideoTask)
 
-	size, header, err := GetVideoSize(link.String(), header)
+	size, h, err := GetVideoSize(link.String(), header)
 	if err != nil {
 		slog.Warn("get video size failed", slog.String("key", key), slog.Any("error", err))
 		task.err = err
@@ -80,7 +80,7 @@ func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask
 	slog.Info("get video size", slog.String("key", key), slog.String("size", bytefmt.ByteSize(uint64(size))))
 
 	// copy header
-	task.header = header.Clone()
+	task.header = h.Clone()
 	task.header.Del("Via")
 	task.header.Del("X-Cache")
 	task.header.Set("X-Server", ServerName)
@@ -97,11 +97,13 @@ func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask
 		err = DownloadChunk(link, header, size, tempF)
 		tempF.Close()
 		if err != nil {
+			slog.Warn("download failed", slog.String("key", key), slog.Any("error", err))
 			os.Remove(tempF.Name())
 			task.err = err
-		} else {
-			task.done.Store(true)
+			return
 		}
+
+		task.done.Store(true)
 		pass := time.Since(start).Seconds()
 		speed := float64(size) / pass
 		slog.Info("download finished",
@@ -213,7 +215,7 @@ func DownloadToFile(link url.URL, header http.Header, start, end int, f *os.File
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
-		return errors.New("not partial content")
+		return fmt.Errorf("not 206 response: %d", resp.StatusCode)
 	}
 	// write body to file
 	var (
