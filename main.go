@@ -50,14 +50,27 @@ var (
 )
 
 type VideoTask struct {
-	done   atomic.Bool
+	done   chan struct{}
 	err    error
 	file   string
 	header http.Header
 }
 
+func (t *VideoTask) MarkDone() {
+	close(t.done)
+}
+
 func (t *VideoTask) Done() bool {
-	return t.done.Load()
+	select {
+	case <-t.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (t *VideoTask) Wait() <-chan struct{} {
+	return t.done
 }
 
 func (t *VideoTask) Error() error {
@@ -70,6 +83,7 @@ func (t *VideoTask) Error() error {
 
 func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask) {
 	task = new(VideoTask)
+	task.done = make(chan struct{})
 
 	size, h, err := GetVideoSize(link.String(), header)
 	if err != nil {
@@ -103,7 +117,7 @@ func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask
 			return
 		}
 
-		task.done.Store(true)
+		task.MarkDone()
 		pass := time.Since(start).Seconds()
 		speed := float64(size) / pass
 		slog.Info("download finished",
@@ -292,29 +306,47 @@ func HandleVideo(writer http.ResponseWriter, request *http.Request) error {
 	link.Scheme = "http"
 	link.Host = CDN
 
+	var (
+		task *VideoTask
+		hit  bool
+	)
+
 	mu.Lock()
 
 	c, ok := cache[key]
 	if ok && c.Done() {
+		task = c
+		hit = true
 		// hit cache
 	} else if ok && c.Error() == nil {
 		// still downloading
-		c = nil
+		task = c
+		hit = false
 	} else if !ok || c.Error() != nil {
 		delete(cache, key)
-		c = nil
-
 		cache[key] = NewVideoTask(key, link, header)
-	} else {
-		// other cases
+
+		task = cache[key]
+		hit = false
 	}
 
 	mu.Unlock()
 
-	if c != nil {
+	if hit {
 		ResponseWithFile(writer, request, c)
 	} else {
-		ResponseByPass(writer, link, header)
+		done := make(chan struct{})
+		go func() {
+			ResponseByPass(writer, link, header)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// bypass done, return
+		case <-task.Wait():
+			// task is done, break
+		}
 	}
 	return nil
 }
