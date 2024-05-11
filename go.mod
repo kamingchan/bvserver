@@ -1,8 +1,8 @@
 module github.com/kamingchan/bvserver
 
-go 1.21.1
+go 1.22
 
 require (
-	code.cloudfoundry.org/bytefmt v0.0.0-20230612151507-41ef4d1f67a4
-	golang.org/x/sync v0.3.0
+	code.cloudfoundry.org/bytefmt v0.0.0-20240510175427-fd0528cc37f1
+	golang.org/x/sync v0.7.0
 )
