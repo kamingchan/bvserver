@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,8 +36,26 @@ func init() {
 }
 
 var (
-	client = &http.Client{
+	dialer = &net.Dialer{
+		Timeout:   time.Second * 5,
+		KeepAlive: time.Second * 15,
+	}
+	h1Client = &http.Client{
 		Transport: &http.Transport{
+			DialContext:           dialer.DialContext,
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     false,
+			MaxIdleConns:          10,
+			MaxIdleConnsPerHost:   10,
+			MaxConnsPerHost:       200,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+	h2Client = &http.Client{
+		Transport: &http.Transport{
+			DialContext:           dialer.DialContext,
 			Proxy:                 http.ProxyFromEnvironment,
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          10,
@@ -158,7 +177,7 @@ func ResponseByPass(writer http.ResponseWriter, link url.URL, header http.Header
 	}
 	req.Header = header.Clone()
 
-	resp, err := client.Do(req)
+	resp, err := h1Client.Do(req)
 	if err != nil {
 		writer.WriteHeader(http.StatusInternalServerError)
 		return
@@ -203,7 +222,7 @@ func GetVideoSize(link string, header http.Header) (int64, http.Header, error) {
 	req.Header = header.Clone()
 	req.Header.Del("Range")
 
-	resp, err := client.Do(req)
+	resp, err := h2Client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -223,7 +242,7 @@ func DownloadToFile(link url.URL, header http.Header, start, end int, f *os.File
 	req.Header = header.Clone()
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 
-	resp, err := client.Do(req)
+	resp, err := h1Client.Do(req)
 	if err != nil {
 		return err
 	}
