@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"code.cloudfoundry.org/bytefmt"
+	"github.com/rs/cors"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -207,6 +208,10 @@ func HandleStat(writer http.ResponseWriter, request *http.Request) error {
 
 func copyHeaders(dst http.Header, src http.Header) {
 	for key := range src {
+		// ignore cors headers
+		if strings.HasPrefix(key, "Access-Control-") {
+			continue
+		}
 		values := src.Values(key)
 		for _, v := range values {
 			dst.Add(key, v)
@@ -376,5 +381,5 @@ func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 
 func main() {
 	flag.Parse()
-	http.ListenAndServe(Listen, &handler{})
+	http.ListenAndServe(Listen, cors.AllowAll().Handler(&handler{}))
 }
