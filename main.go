@@ -157,31 +157,36 @@ var (
 
 type wrapper struct {
 	http.ResponseWriter
+
+	written atomic.Uint64
 }
 
 func (w *wrapper) Write(b []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(b)
 	CacheBytes.Add(uint64(n))
+	w.written.Add(uint64(n))
 	return n, err
 }
 
-func ResponseWithFile(writer http.ResponseWriter, request *http.Request, task *VideoTask) {
-	copyHeaders(writer.Header(), task.header)
-	http.ServeFile(&wrapper{writer}, request, task.file)
+func ResponseWithFile(_writer http.ResponseWriter, request *http.Request, task *VideoTask) uint64 {
+	copyHeaders(_writer.Header(), task.header)
+	writer := &wrapper{ResponseWriter: _writer}
+	http.ServeFile(writer, request, task.file)
+	return writer.written.Load()
 }
 
-func ResponseByPass(writer http.ResponseWriter, link url.URL, header http.Header) {
+func ResponseByPass(writer http.ResponseWriter, link url.URL, header http.Header) int64 {
 	req, err := http.NewRequest(http.MethodGet, link.String(), nil)
 	if err != nil {
 		writer.WriteHeader(http.StatusInternalServerError)
-		return
+		return 0
 	}
 	req.Header = header.Clone()
 
 	resp, err := h1Client.Do(req)
 	if err != nil {
 		writer.WriteHeader(http.StatusInternalServerError)
-		return
+		return 0
 	}
 	defer resp.Body.Close()
 
@@ -189,6 +194,7 @@ func ResponseByPass(writer http.ResponseWriter, link url.URL, header http.Header
 	writer.WriteHeader(resp.StatusCode)
 	written, _ := io.Copy(writer, resp.Body)
 	ByPassBytes.Add(uint64(written))
+	return written
 }
 
 func HandleStat(writer http.ResponseWriter, request *http.Request) error {
@@ -357,7 +363,8 @@ func HandleVideo(writer http.ResponseWriter, request *http.Request) error {
 	mu.Unlock()
 
 	if hit {
-		ResponseWithFile(writer, request, c)
+		written := ResponseWithFile(writer, request, c)
+		slog.Info("cache hit", slog.String("key", key), slog.String("size", bytefmt.ByteSize(written)))
 	} else {
 		done := make(chan struct{})
 		go func() {
