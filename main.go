@@ -32,7 +32,7 @@ var (
 func init() {
 	flag.StringVar(&Listen, "listen", "127.0.0.1:2333", "listen address")
 	flag.IntVar(&ChunkSize, "chunksize", 10, "chunk size in MB")
-	flag.StringVar(&CDN, "cdn", "upos-sz-mirroraliov.bilivideo.com", "Bilibili CDN host")
+	flag.StringVar(&CDN, "cdn", "upos-sz-mirrorali.bilivideo.com", "Bilibili CDN host")
 	flag.StringVar(&ServerName, "server", "bvserver", "Custom server name")
 }
 
