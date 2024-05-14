@@ -313,16 +313,16 @@ var (
 type handler struct{}
 
 func ServeHTTP(writer http.ResponseWriter, request *http.Request) error {
-	if strings.HasPrefix(request.URL.Path, "/stat") {
+	switch {
+	case strings.HasPrefix(request.URL.Path, "/stat"):
 		return HandleStat(writer, request)
-	}
-	if strings.HasPrefix(request.URL.Path, "/upgcxcode") {
+	case strings.HasPrefix(request.URL.Path, "/upgcxcode"):
 		return HandleVideo(writer, request)
+	default:
+		writer.Header().Set("Location", "https://github.com/kamingchan/bvserver")
+		writer.WriteHeader(http.StatusTemporaryRedirect)
+		return nil
 	}
-
-	writer.Header().Set("Location", "https://github.com/kamingchan/bvserver")
-	writer.WriteHeader(http.StatusTemporaryRedirect)
-	return nil
 }
 
 func HandleVideo(writer http.ResponseWriter, request *http.Request) error {
@@ -368,15 +368,28 @@ func HandleVideo(writer http.ResponseWriter, request *http.Request) error {
 	} else {
 		done := make(chan struct{})
 		go func() {
-			ResponseByPass(writer, link, header)
+			start := time.Now()
+			slog.Info("bypass started", slog.String("key", key))
+			bytes := ResponseByPass(writer, link, header)
+			pass := time.Since(start).Seconds()
+			slog.Info("bypass finished", slog.String("key", key), slog.String("speed", bytefmt.ByteSize(uint64(float64(bytes)/pass))+"/s"))
 			close(done)
 		}()
 
 		select {
 		case <-done:
 			// bypass done, return
+			return nil
 		case <-task.Wait():
 			// task is done, break
+			conn, _, err := writer.(http.Hijacker).Hijack()
+			if err != nil {
+				slog.Warn("hijack failed", slog.String("key", key), slog.Any("error", err))
+				return err
+			}
+			conn.Close()
+			slog.Info("download finished, interrupt bypass", slog.String("key", key))
+			<-done
 		}
 	}
 	return nil
