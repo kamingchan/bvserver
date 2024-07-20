@@ -435,12 +435,7 @@ func HandleVideo(writer http.ResponseWriter, request *http.Request) error {
 			return nil
 		case <-task.Wait():
 			// task is done, break
-			conn, _, err := writer.(http.Hijacker).Hijack()
-			if err != nil {
-				slog.Warn("hijack failed", slog.String("key", key), slog.Any("error", err))
-				return err
-			}
-			conn.Close()
+			request.Context().Value(ctxConnKey{}).(net.Conn).Close()
 			slog.Info("download finished, interrupt bypass", slog.String("key", key))
 			<-done
 		}
@@ -491,9 +486,18 @@ func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	ServeHTTP(writer, request)
 }
 
+type ctxConnKey struct{}
+
 func main() {
 	flag.Parse()
-	go http.ListenAndServe(Listen, cors.AllowAll().Handler(&handler{}))
+	s := &http.Server{
+		Addr:    Listen,
+		Handler: cors.AllowAll().Handler(&handler{}),
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			return context.WithValue(ctx, ctxConnKey{}, c)
+		},
+	}
+	go s.ListenAndServe()
 	go worker()
 	select {}
 }
