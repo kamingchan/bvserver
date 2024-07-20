@@ -287,6 +287,9 @@ func GetVideoSize(link string, header http.Header) (int64, http.Header, error) {
 	if resp.StatusCode >= 300 {
 		return 0, nil, errors.New("not 2xx response")
 	}
+	if resp.ContentLength == 0 {
+		return 0, nil, fmt.Errorf("invalid content length: %d, status code: %d", resp.ContentLength, resp.StatusCode)
+	}
 	return resp.ContentLength, resp.Header, nil
 }
 
