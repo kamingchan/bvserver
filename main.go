@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ import (
 
 	"code.cloudfoundry.org/bytefmt"
 	"github.com/rs/cors"
+	"github.com/samber/lo"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
@@ -74,6 +76,7 @@ var (
 type VideoTask struct {
 	done   chan struct{}
 	err    error
+	key    string
 	file   string
 	header http.Header
 
@@ -113,6 +116,7 @@ func (t *VideoTask) Hit() {
 
 func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask) {
 	task = new(VideoTask)
+	task.key = key
 	task.done = make(chan struct{})
 	task.hit = time.Now()
 
@@ -454,6 +458,35 @@ func diskAvailable() (float64, error) {
 	return float64(stat.Bavail) / float64(stat.Blocks), nil
 }
 
+func worker() {
+	t := time.NewTicker(time.Minute)
+
+	for range t.C {
+		av, err := diskAvailable()
+		if err != nil {
+			continue
+		}
+		if av > 0.1 {
+			continue
+		}
+
+		// clean cache
+		mu.Lock()
+		tasks := lo.Values(cache)
+		tasks = lo.Filter(tasks, func(t *VideoTask, _ int) bool { return t.Done() })
+		slices.SortFunc(tasks, func(i, j *VideoTask) int { return int(i.hit.Unix() - j.hit.Unix()) })
+		// remove 30% of cache
+		for i := 0; i < len(tasks)/3; i++ {
+			delete(cache, tasks[i].key)
+			os.Remove(tasks[i].file)
+		}
+		mu.Unlock()
+
+		after, _ := diskAvailable()
+		slog.Info("disk full, clean cache", slog.String("before", fmt.Sprintf("%.2f", av)), slog.String("after", fmt.Sprintf("%.2f", after)))
+	}
+}
+
 func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	ServeHTTP(writer, request)
 }
@@ -461,5 +494,6 @@ func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 func main() {
 	flag.Parse()
 	go http.ListenAndServe(Listen, cors.AllowAll().Handler(&handler{}))
+	go worker()
 	select {}
 }
