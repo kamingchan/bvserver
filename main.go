@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ import (
 	"code.cloudfoundry.org/bytefmt"
 	"github.com/rs/cors"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -74,6 +76,10 @@ type VideoTask struct {
 	err    error
 	file   string
 	header http.Header
+
+	hit   time.Time
+	size  int64
+	speed float64
 }
 
 func (t *VideoTask) MarkDone() {
@@ -101,9 +107,14 @@ func (t *VideoTask) Error() error {
 	return err
 }
 
+func (t *VideoTask) Hit() {
+	t.hit = time.Now()
+}
+
 func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask) {
 	task = new(VideoTask)
 	task.done = make(chan struct{})
+	task.hit = time.Now()
 
 	size, h, err := GetVideoSize(link.String(), header)
 	if err != nil {
@@ -118,6 +129,14 @@ func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask
 	task.header.Del("Via")
 	task.header.Del("X-Cache")
 	task.header.Set("X-Server", ServerName)
+	task.file = path.Join(os.TempDir(), key)
+
+	if info, err := os.Stat(task.file); err == nil && info.Size() == size {
+		task.MarkDone()
+		slog.Info("file exists", slog.String("key", key), slog.String("path", task.file))
+		task.size = size
+		return
+	}
 
 	tempF, err := os.CreateTemp("", key)
 	if err != nil {
@@ -125,13 +144,20 @@ func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask
 		task.err = err
 		return
 	}
-	task.file = tempF.Name()
 	go func() {
 		start := time.Now()
 		err = DownloadChunk(link, header, size, tempF)
 		tempF.Close()
 		if err != nil {
 			slog.Warn("download failed", slog.String("key", key), slog.Any("error", err))
+			os.Remove(tempF.Name())
+			task.err = err
+			return
+		}
+
+		err = os.Rename(tempF.Name(), task.file)
+		if err != nil {
+			slog.Warn("rename temp file failed", slog.String("key", key), slog.Any("error", err))
 			os.Remove(tempF.Name())
 			task.err = err
 			return
@@ -145,6 +171,8 @@ func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask
 			slog.String("path", tempF.Name()),
 			slog.String("speed", bytefmt.ByteSize(uint64(speed))+"/s"),
 		)
+		task.size = size
+		task.speed = speed
 	}()
 
 	return task
@@ -206,9 +234,26 @@ func HandleStat(writer http.ResponseWriter, request *http.Request) error {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
 
+	available, _ := diskAvailable()
+
+	mu.Lock()
+	defer mu.Unlock()
+	var summaries []any
+	for key, t := range cache {
+		summaries = append(summaries, map[string]any{
+			"key":   key,
+			"hit":   t.hit,
+			"file":  t.file,
+			"size":  bytefmt.ByteSize(uint64(t.size)),
+			"speed": bytefmt.ByteSize(uint64(t.speed)) + "/s",
+		})
+	}
+
 	return json.NewEncoder(writer).Encode(map[string]any{
 		"cache_hit": c,
 		"bypass":    b,
+		"available": available,
+		"tasks":     summaries,
 	})
 }
 
@@ -363,6 +408,7 @@ func HandleVideo(writer http.ResponseWriter, request *http.Request) error {
 	mu.Unlock()
 
 	if hit {
+		c.Hit()
 		written := ResponseWithFile(writer, request, c)
 		slog.Info("cache hit", slog.String("key", key), slog.String("size", bytefmt.ByteSize(written)))
 	} else {
@@ -395,11 +441,22 @@ func HandleVideo(writer http.ResponseWriter, request *http.Request) error {
 	return nil
 }
 
+func diskAvailable() (float64, error) {
+	tmpDir := os.TempDir()
+	var stat unix.Statfs_t
+	err := unix.Statfs(tmpDir, &stat)
+	if err != nil {
+		return 0, err
+	}
+	return float64(stat.Bavail) / float64(stat.Blocks), nil
+}
+
 func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	ServeHTTP(writer, request)
 }
 
 func main() {
 	flag.Parse()
-	http.ListenAndServe(Listen, cors.AllowAll().Handler(&handler{}))
+	go http.ListenAndServe(Listen, cors.AllowAll().Handler(&handler{}))
+	select {}
 }
