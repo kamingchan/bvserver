@@ -151,22 +151,43 @@ func NewVideoTask(key string, link url.URL, header http.Header) (task *VideoTask
 		task.err = err
 		return
 	}
+
+	closeAndClean := func() {
+		tempF.Close()
+		os.Remove(tempF.Name())
+	}
+
+	// preallocate
+	_, err = tempF.WriteAt([]byte{0}, size-1)
+	if err != nil {
+		slog.Warn("preallocate failed", slog.String("key", key), slog.Any("error", err))
+		task.err = err
+		closeAndClean()
+		return
+	}
+	err = tempF.Sync()
+	if err != nil {
+		slog.Warn("sync failed", slog.String("key", key), slog.Any("error", err))
+		task.err = err
+		closeAndClean()
+		return
+	}
 	go func() {
 		start := time.Now()
 		err = DownloadChunk(link, header, size, tempF)
 		tempF.Close()
 		if err != nil {
 			slog.Warn("download failed", slog.String("key", key), slog.Any("error", err))
-			os.Remove(tempF.Name())
 			task.err = err
+			closeAndClean()
 			return
 		}
 
 		err = os.Rename(tempF.Name(), task.file)
 		if err != nil {
 			slog.Warn("rename temp file failed", slog.String("key", key), slog.Any("error", err))
-			os.Remove(tempF.Name())
 			task.err = err
+			closeAndClean()
 			return
 		}
 
