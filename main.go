@@ -106,6 +106,9 @@ func (t *VideoTask) Error() error {
 	if t.err != nil {
 		return t.err
 	}
+	if t.Done() == false {
+		return nil
+	}
 	_, err := os.Stat(t.file)
 	return err
 }
